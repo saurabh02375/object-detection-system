@@ -1,16 +1,16 @@
-from flask import Flask, Response, request, render_template, redirect, url_for, send_from_directory
+from flask import Flask, Response, request, redirect, url_for, render_template, send_file
 import cv2
+import torch
 import numpy as np
-from ultralytics import YOLO
-import os
+from werkzeug.utils import secure_filename
+import io
+from PIL import Image
 
 app = Flask(__name__)
 
-# Load pre-trained YOLOv5 model using ultralytics
-model = YOLO('yolov5s.pt')  # Ensure you have the YOLOv5 weights file locally
+# Load pre-trained YOLOv5 model
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
 
-UPLOAD_FOLDER = 'uploads'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif'}
 
 def allowed_file(filename):
@@ -18,10 +18,18 @@ def allowed_file(filename):
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 def detect_objects(frame):
+    # Convert BGR image to RGB
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Perform object detection
     results = model(rgb_frame)
+    
+    # Render results on the frame
     annotated_frame = results.render()[0]
+    
+    # Convert RGB image back to BGR for correct color display
     annotated_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR)
+    
     return annotated_frame
 
 def generate_frames():
@@ -55,26 +63,27 @@ def video_feed():
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        if 'start_camera' in request.form:
-            return render_template('index.html', camera=True)
-        elif 'clear_camera' in request.form:
-            return redirect(url_for('index'))
-        elif 'file' in request.files:
+        if 'file' in request.files:
             file = request.files['file']
             if file and allowed_file(file.filename):
-                filename = secure_filename(file.filename)
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(file_path)
-                image = cv2.imread(file_path)
-                detected_image = detect_objects(image)
-                detected_image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'detected_' + filename)
-                cv2.imwrite(detected_image_path, detected_image)
-                return render_template('index.html', image_url=url_for('uploaded_file', filename='detected_' + filename))
-    return render_template('index.html', camera=False)
-
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+                # Read the uploaded image directly from the file stream
+                image = Image.open(file.stream).convert('RGB')
+                image_np = np.array(image)
+                image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+                
+                # Perform object detection on the uploaded image
+                detected_image = detect_objects(image_np)
+                
+                # Convert the result image to JPEG format
+                _, img_encoded = cv2.imencode('.jpg', detected_image)
+                img_io = io.BytesIO(img_encoded)
+                
+                return send_file(img_io, mimetype='image/jpeg')
+        elif 'start_camera' in request.form:
+            return redirect(url_for('index', camera=True))
+        elif 'clear_camera' in request.form:
+            return redirect(url_for('index', camera=False))
+    return render_template('index.html', camera=request.args.get('camera'))
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=8080)
+    app.run(debug=True, threaded=True)
